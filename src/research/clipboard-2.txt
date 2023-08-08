@@ -1,0 +1,158 @@
+#include <glib.h>
+#include <gio/gio.h>
+
+typedef struct {
+    guint32 accumulator;
+} Accumulator;
+
+typedef struct {
+    GObject parent_instance;
+    Accumulator *accumulator;
+    gboolean polling;
+    guint timeout_id;
+    GFile *input_file1;
+    GFile *input_file2;
+    GFile *output_file;
+} AccumulatorObject;
+
+G_DEFINE_TYPE(AccumulatorObject, accumulator_object, G_TYPE_OBJECT);
+
+static void accumulator_object_init(AccumulatorObject *obj) {
+    obj->accumulator = g_malloc(sizeof(Accumulator));
+    obj->accumulator->accumulator = 0;
+    obj->polling = FALSE;
+    obj->timeout_id = 0;
+    obj->input_file1 = NULL;
+    obj->input_file2 = NULL;
+    obj->output_file = NULL;
+}
+
+static void accumulator_object_finalize(GObject *object) {
+    AccumulatorObject *obj = ACCUMULATOR_OBJECT(object);
+    if (obj->polling) {
+        g_source_remove(obj->timeout_id);
+    }
+    if (obj->input_file1) {
+        g_object_unref(obj->input_file1);
+    }
+    if (obj->input_file2) {
+        g_object_unref(obj->input_file2);
+    }
+    if (obj->output_file) {
+        g_object_unref(obj->output_file);
+    }
+    g_free(obj->accumulator);
+    G_OBJECT_CLASS(accumulator_object_parent_class)->finalize(object);
+}
+
+static void accumulator_object_class_init(AccumulatorObjectClass *klass) {
+    GObjectClass *object_class = G_OBJECT_CLASS(klass);
+    object_class->finalize = accumulator_object_finalize;
+}
+
+AccumulatorObject *accumulator_object_new(void) {
+    return g_object_new(ACCUMULATOR_TYPE_OBJECT, NULL);
+}
+
+static gboolean poll_accumulator(gpointer user_data) {
+    AccumulatorObject *obj = ACCUMULATOR_OBJECT(user_data);
+    guint32 value = accumulator_get_value(obj);
+    g_print("Accumulator value: 0x%06X\n", value);
+
+    if (obj->output_file) {
+        GDateTime *current_time = g_date_time_new_now_local();
+        const gchar *timestamp_str = g_date_time_format(current_time, "%Y-%m-%d %H:%M:%S");
+        gchar *output = g_strdup_printf("%s - Result: 0x%06X\n", timestamp_str, value);
+        g_date_time_unref(current_time);
+
+        GFileOutputStream *output_stream = g_file_append_to(obj->output_file, G_FILE_CREATE_NONE, NULL, NULL);
+        g_output_stream_write(G_OUTPUT_STREAM(output_stream), output, -1, NULL, NULL, NULL);
+        g_output_stream_close(G_OUTPUT_STREAM(output_stream), NULL, NULL);
+        g_free(output);
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
+void start_polling(AccumulatorObject *obj, guint interval_ms, const gchar *input_filename1, const gchar *input_filename2, const gchar *output_filename) {
+    if (!obj->polling) {
+        obj->polling = TRUE;
+        obj->timeout_id = g_timeout_add(interval_ms, poll_accumulator, obj);
+
+        if (input_filename1) {
+            obj->input_file1 = g_file_new_for_path(input_filename1);
+        }
+
+        if (input_filename2) {
+            obj->input_file2 = g_file_new_for_path(input_filename2);
+        }
+
+        if (output_filename) {
+            obj->output_file = g_file_new_for_path(output_filename);
+        }
+    }
+}
+
+void stop_polling(AccumulatorObject *obj) {
+    if (obj->polling) {
+        g_source_remove(obj->timeout_id);
+        obj->polling = FALSE;
+
+        if (obj->input_file1) {
+            g_object_unref(obj->input_file1);
+            obj->input_file1 = NULL;
+        }
+
+        if (obj->input_file2) {
+            g_object_unref(obj->input_file2);
+            obj->input_file2 = NULL;
+        }
+
+        if (obj->output_file) {
+            g_object_unref(obj->output_file);
+            obj->output_file = NULL;
+        }
+    }
+}
+
+void accumulator_add(AccumulatorObject *obj, guint32 value) {
+    obj->accumulator->accumulator += value;
+    if (obj->accumulator->accumulator > 0xFFFFFF) {
+        obj->accumulator->accumulator &= 0xFFFFFF;
+    }
+}
+
+guint32 accumulator_get_value(AccumulatorObject *obj) {
+    return obj->accumulator->accumulator;
+}
+
+int main(int argc, char *argv[]) {
+    g_type_init();
+    g_unix_signal_add(SIGINT, (GSourceFunc)g_main_loop_quit, NULL);
+
+    AccumulatorObject *accumulator = accumulator_object_new();
+
+    if (argc >= 3) {
+        const gchar *input_filename1 = argv[1];
+        const gchar *input_filename2 = argv[2];
+        const gchar *output_filename = "output.c9x";
+
+        accumulator_add(accumulator, 0x123456);
+        accumulator_add(accumulator, 0x789ABC);
+
+        start_polling(accumulator, 60000, input_filename1, input_filename2, output_filename); // Start polling every minute
+
+        GMainLoop *main_loop = g_main_loop_new(NULL, FALSE);
+        g_main_loop_run(main_loop);
+
+        stop_polling(accumulator);
+
+        g_main_loop_unref(main_loop);
+    } else {
+        g_print("Usage: %s <input_file1> <input_file2>\n", argv[0]);
+    }
+
+    g_object_unref(accumulator);
+
+    return 0;
+}
